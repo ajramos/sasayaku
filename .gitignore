@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+*.o
+*.dylib
+*.dSYM
+.DS_Store
+Models/
+*.ggml
+Sasayaku.app/
