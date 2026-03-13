@@ -7,6 +7,7 @@ DerivedData/
 *.dylib
 *.dSYM
 .DS_Store
-Models/
+# Downloaded whisper models (not source code)
 *.ggml
+*.bin
 Sasayaku.app/

@@ -15,7 +15,7 @@ struct MenuBarView: View {
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                 }
                 Spacer()
-                Text("v1.0")
+                Text("v1.1")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.quaternary)
             }
@@ -24,7 +24,7 @@ struct MenuBarView: View {
             .padding(.bottom, 12)
 
             // Status card
-            StatusIndicator(state: appState.recordingState, isModelReady: appState.isModelDownloaded)
+            StatusIndicator(state: appState.recordingState, isModelReady: appState.isModelReady)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
                 .background(
@@ -32,6 +32,25 @@ struct MenuBarView: View {
                         .fill(statusCardColor)
                 )
                 .padding(.horizontal, 12)
+
+            // Model loading indicator
+            if appState.isLoadingModel {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("Loading \(appState.selectedModel.rawValue) model...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(.blue.opacity(0.06))
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+            }
 
             // Last transcription
             if !appState.lastTranscription.isEmpty {
@@ -70,13 +89,6 @@ struct MenuBarView: View {
                 .padding(.top, 12)
             }
 
-            // Model download
-            if !appState.isModelDownloaded {
-                modelDownloadCard
-                    .padding(.horizontal, 12)
-                    .padding(.top, 12)
-            }
-
             Spacer().frame(height: 12)
 
             Divider()
@@ -104,63 +116,6 @@ struct MenuBarView: View {
         case .error: .red.opacity(0.06)
         default: .primary.opacity(0.04)
         }
-    }
-
-    @ViewBuilder
-    private var modelDownloadCard: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(.blue.opacity(0.1))
-                        .frame(width: 36, height: 36)
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.blue)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Model required")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(appState.selectedModel.displayName)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            if appState.isDownloading {
-                VStack(spacing: 6) {
-                    ProgressView(value: appState.downloadProgress)
-                        .tint(.blue)
-                    HStack {
-                        Text("Downloading...")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(Int(appState.downloadProgress * 100))%")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } else {
-                Button {
-                    NotificationCenter.default.post(name: .downloadModel, object: nil)
-                } label: {
-                    Text("Download Model")
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-            }
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.primary.opacity(0.04))
-        )
     }
 }
 
@@ -228,5 +183,5 @@ private struct MenuRow: View {
 }
 
 extension Notification.Name {
-    static let downloadModel = Notification.Name("downloadModel")
+    static let loadModel = Notification.Name("loadModel")
 }

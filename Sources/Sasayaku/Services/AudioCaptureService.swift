@@ -5,103 +5,140 @@ final class AudioCaptureService: @unchecked Sendable {
     private var audioEngine: AVAudioEngine?
     private var audioBuffer: [Float] = []
     private let lock = NSLock()
-    private let targetSampleRate: Double = 16000
+    private var tapInstalled = false
+    private var tapCallCount = 0
 
     func startRecording() throws {
+        // Create a fresh engine each time to avoid keeping the mic active
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
-        let nativeFormat = inputNode.outputFormat(forBus: 0)
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        print("[Sasayaku] Hardware format: rate=\(hwFormat.sampleRate) ch=\(hwFormat.channelCount)")
 
-        print("[Sasayaku] Native audio format: \(nativeFormat.sampleRate)Hz, \(nativeFormat.channelCount)ch, \(nativeFormat.commonFormat.rawValue)")
+        // CRITICAL: Access mainMixerNode to force the audio graph to be built.
+        // Without this, taps on inputNode may never fire at certain sample rates.
+        let mixer = engine.mainMixerNode
+        mixer.outputVolume = 0
 
-        guard nativeFormat.sampleRate > 0 else {
-            throw AudioError.noInputDevice
+        // Create a 16kHz mono format for Whisper
+        let whisperFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+
+        // Create converter if sample rate differs
+        let needsConversion = hwFormat.sampleRate != 16000 || hwFormat.channelCount != 1
+        var converter: AVAudioConverter?
+        if needsConversion {
+            converter = AVAudioConverter(from: hwFormat, to: whisperFormat)
+            if converter == nil {
+                print("[Sasayaku] WARNING: Could not create converter — will use manual resampling")
+            } else {
+                print("[Sasayaku] Converter ready: \(hwFormat.sampleRate)Hz/\(hwFormat.channelCount)ch → 16000Hz/1ch")
+            }
         }
 
         lock.lock()
         audioBuffer = []
+        tapCallCount = 0
         lock.unlock()
 
-        // Use nil format to get the native format — most reliable
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
             guard let self else { return }
-            let samples = Self.extractAndResample(buffer: buffer, targetRate: self.targetSampleRate)
-            if !samples.isEmpty {
-                self.lock.lock()
-                self.audioBuffer.append(contentsOf: samples)
-                self.lock.unlock()
+
+            let frameLength = Int(buffer.frameLength)
+            guard frameLength > 0, let floatData = buffer.floatChannelData else { return }
+
+            var samples: [Float]
+
+            if let converter {
+                let ratio = 16000.0 / buffer.format.sampleRate
+                let outputFrames = AVAudioFrameCount(Double(frameLength) * ratio)
+                guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: outputFrames) else { return }
+
+                var error: NSError?
+                let inputBuffer = buffer
+                var hasProvidedInput = false
+                converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+                    if hasProvidedInput {
+                        outStatus.pointee = .noDataNow
+                        return nil
+                    }
+                    hasProvidedInput = true
+                    outStatus.pointee = .haveData
+                    return inputBuffer
+                }
+
+                if let error {
+                    print("[Sasayaku] Converter error: \(error)")
+                    return
+                }
+
+                guard let outData = outputBuffer.floatChannelData, outputBuffer.frameLength > 0 else { return }
+                samples = Array(UnsafeBufferPointer(start: outData[0], count: Int(outputBuffer.frameLength)))
+            } else if buffer.format.sampleRate != 16000 {
+                let raw = Array(UnsafeBufferPointer(start: floatData[0], count: frameLength))
+                samples = Self.resample(raw, from: buffer.format.sampleRate, to: 16000)
+            } else {
+                samples = Array(UnsafeBufferPointer(start: floatData[0], count: frameLength))
+            }
+
+            self.lock.lock()
+            self.tapCallCount += 1
+            self.audioBuffer.append(contentsOf: samples)
+            let count = self.tapCallCount
+            let total = self.audioBuffer.count
+            self.lock.unlock()
+
+            if count <= 3 || count % 50 == 0 {
+                print("[Sasayaku] TAP #\(count): \(frameLength)→\(samples.count) frames, total=\(total)")
             }
         }
+        tapInstalled = true
 
         engine.prepare()
-        try engine.start()
-        self.audioEngine = engine
-        print("[Sasayaku] Audio engine started, recording...")
+        do {
+            try engine.start()
+            self.audioEngine = engine
+            print("[Sasayaku] Audio engine started — recording")
+        } catch {
+            print("[Sasayaku] Audio engine start failed: \(error)")
+            throw AudioError.noInputDevice
+        }
     }
 
     func stopRecording() -> [Float] {
-        audioEngine?.inputNode.removeTap(onBus: 0)
+        if tapInstalled, let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        // Stop and release the engine so macOS hides the mic indicator
         audioEngine?.stop()
         audioEngine = nil
 
         lock.lock()
         let result = audioBuffer
+        let taps = tapCallCount
         audioBuffer = []
+        tapCallCount = 0
         lock.unlock()
 
+        print("[Sasayaku] Stopped: \(result.count) frames from \(taps) callbacks")
         return result
     }
 
-    /// Extract float samples from buffer and resample to target rate if needed
-    private static func extractAndResample(buffer: AVAudioPCMBuffer, targetRate: Double) -> [Float] {
-        let sourceRate = buffer.format.sampleRate
-        let channelCount = buffer.format.channelCount
-        let frameLength = Int(buffer.frameLength)
-
-        guard frameLength > 0 else { return [] }
-
-        // Get mono float samples
-        var monoSamples: [Float]
-
-        if let floatData = buffer.floatChannelData {
-            // Already float format — take first channel
-            monoSamples = Array(UnsafeBufferPointer(start: floatData[0], count: frameLength))
-        } else if let int16Data = buffer.int16ChannelData {
-            // Convert int16 to float
-            monoSamples = (0..<frameLength).map { i in
-                Float(int16Data[0][i]) / Float(Int16.max)
-            }
-        } else if let int32Data = buffer.int32ChannelData {
-            // Convert int32 to float
-            monoSamples = (0..<frameLength).map { i in
-                Float(int32Data[0][i]) / Float(Int32.max)
-            }
-        } else {
-            return []
-        }
-
-        // If multi-channel, we already took channel 0 (mono)
-
-        // Resample if needed
-        guard sourceRate != targetRate else { return monoSamples }
-
+    private static func resample(_ input: [Float], from sourceRate: Double, to targetRate: Double) -> [Float] {
         let ratio = targetRate / sourceRate
-        let outputLength = Int(Double(monoSamples.count) * ratio)
+        let outputLength = Int(Double(input.count) * ratio)
         guard outputLength > 0 else { return [] }
 
-        // Simple linear interpolation resampling
-        var resampled = [Float](repeating: 0, count: outputLength)
+        var output = [Float](repeating: 0, count: outputLength)
         for i in 0..<outputLength {
-            let srcIndex = Double(i) / ratio
-            let srcIndexFloor = Int(srcIndex)
-            let frac = Float(srcIndex - Double(srcIndexFloor))
-
-            let s0 = monoSamples[min(srcIndexFloor, monoSamples.count - 1)]
-            let s1 = monoSamples[min(srcIndexFloor + 1, monoSamples.count - 1)]
-            resampled[i] = s0 + frac * (s1 - s0)
+            let srcIdx = Double(i) / ratio
+            let idx = Int(srcIdx)
+            let frac = Float(srcIdx - Double(idx))
+            let s0 = input[min(idx, input.count - 1)]
+            let s1 = input[min(idx + 1, input.count - 1)]
+            output[i] = s0 + frac * (s1 - s0)
         }
-
-        return resampled
+        return output
     }
 }
 

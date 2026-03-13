@@ -11,11 +11,7 @@ struct SasayakuApp: App {
             MenuBarView()
                 .environment(appState)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: menuBarIcon)
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(menuBarIconColor)
-            }
+            menuBarLabel
         }
         .menuBarExtraStyle(.window)
         .onChange(of: appState.recordingState, initial: true) { _, _ in
@@ -26,23 +22,38 @@ struct SasayakuApp: App {
         }
     }
 
-    private var menuBarIcon: String {
+    @ViewBuilder
+    private var menuBarLabel: some View {
         switch appState.recordingState {
-        case .idle: "mic"
-        case .recording: "mic.circle.fill"
-        case .transcribing: "mic.badge.xmark"
-        case .error: "mic.slash"
+        case .idle:
+            Image(systemName: "waveform")
+        case .recording:
+            HStack(spacing: 3) {
+                Image(systemName: "waveform")
+                Circle()
+                    .fill(.red)
+                    .frame(width: 7, height: 7)
+            }
+        case .transcribing:
+            HStack(spacing: 3) {
+                Image(systemName: "waveform")
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 8))
+            }
+        case .error:
+            HStack(spacing: 3) {
+                Image(systemName: "waveform")
+                Image(systemName: "exclamationmark")
+                    .font(.system(size: 8, weight: .bold))
+            }
         }
     }
+}
 
-    private var menuBarIconColor: Color {
-        switch appState.recordingState {
-        case .idle: .primary
-        case .recording: .green
-        case .transcribing: .orange
-        case .error: .red
-        }
-    }
+private func ts() -> String {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss.SSS"
+    return f.string(from: Date())
 }
 
 @MainActor
@@ -51,15 +62,12 @@ final class AppCoordinator {
     private let audioService = AudioCaptureService()
     private let transcriptionService = TranscriptionService()
     private let hotkeyService = HotkeyService()
-    private let downloader = ModelDownloader()
 
     init(appState: AppState) {
         self.appState = appState
     }
 
     func setup() {
-        appState.isModelDownloaded = appState.selectedModel.isDownloaded
-
         hotkeyService.onRecordingStarted = { [weak self] in
             self?.startRecording()
         }
@@ -68,29 +76,56 @@ final class AppCoordinator {
         }
         hotkeyService.start()
 
-        // Load model if already downloaded
-        if appState.isModelDownloaded {
-            transcriptionService.loadModel(appState.selectedModel, language: appState.selectedLanguage)
-        }
+        // Auto-load model on startup
+        loadModel()
 
-        // Listen for download requests
+        // Listen for model change requests from Settings
         NotificationCenter.default.addObserver(
-            forName: .downloadModel,
+            forName: .loadModel,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.downloadModel()
+                self?.loadModel()
+            }
+        }
+    }
+
+    private func loadModel() {
+        guard !appState.isLoadingModel else { return }
+        appState.isLoadingModel = true
+        appState.isModelReady = false
+
+        let model = appState.selectedModel
+        let language = appState.selectedLanguage
+        Task {
+            do {
+                print("[Sasayaku] Loading model \(model.rawValue)...")
+                try await transcriptionService.loadModel(model, language: language)
+                appState.isModelReady = true
+                appState.isLoadingModel = false
+                print("[Sasayaku] Model ready: \(model.rawValue)")
+            } catch {
+                appState.isLoadingModel = false
+                appState.recordingState = .error("Model load failed: \(error.localizedDescription)")
+                print("[Sasayaku] Model load failed: \(error)")
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    if case .error = appState.recordingState {
+                        appState.recordingState = .idle
+                    }
+                }
             }
         }
     }
 
     private func startRecording() {
-        print("[Sasayaku] startRecording called, state=\(appState.recordingState), modelDownloaded=\(appState.isModelDownloaded)")
+        print("[Sasayaku] startRecording called, state=\(appState.recordingState), modelReady=\(appState.isModelReady)")
         guard appState.recordingState == .idle else { return }
 
-        guard appState.isModelDownloaded else {
-            appState.recordingState = .error("Download a model first")
+        guard appState.isModelReady else {
+            let msg = appState.isLoadingModel ? "Model is loading, please wait..." : "Model not ready"
+            appState.recordingState = .error(msg)
             Task {
                 try? await Task.sleep(for: .seconds(3))
                 if case .error = appState.recordingState {
@@ -117,19 +152,21 @@ final class AppCoordinator {
 
         Task {
             let audioFrames = audioService.stopRecording()
-            print("[Sasayaku] Got \(audioFrames.count) audio frames (\(String(format: "%.1f", Double(audioFrames.count) / 16000))s)")
+            let audioDuration = String(format: "%.1f", Double(audioFrames.count) / 16000)
+            print("[Sasayaku] \(ts()) Got \(audioFrames.count) frames (\(audioDuration)s)")
 
             guard !audioFrames.isEmpty else {
-                print("[Sasayaku] No audio frames captured")
+                print("[Sasayaku] \(ts()) No audio frames captured")
                 appState.recordingState = .idle
                 return
             }
 
             do {
+                print("[Sasayaku] \(ts()) Transcribing...")
                 let text = try await transcriptionService.transcribe(
                     audioFrames: audioFrames
                 )
-                print("[Sasayaku] Transcription: '\(text)'")
+                print("[Sasayaku] \(ts()) Done: '\(text)'")
 
                 guard !text.isEmpty else {
                     appState.recordingState = .idle
@@ -141,32 +178,8 @@ final class AppCoordinator {
                 appState.recordingState = .idle
             } catch {
                 appState.recordingState = .error(error.localizedDescription)
-                // Auto-recover to idle after 3 seconds
                 try? await Task.sleep(for: .seconds(3))
                 appState.recordingState = .idle
-            }
-        }
-    }
-
-    private func downloadModel() {
-        guard !appState.isDownloading else { return }
-        appState.isDownloading = true
-        appState.downloadProgress = 0
-
-        let model = appState.selectedModel
-        Task {
-            do {
-                _ = try await downloader.download(model: model) { [weak self] progress in
-                    Task { @MainActor in
-                        self?.appState.downloadProgress = progress
-                    }
-                }
-                appState.isModelDownloaded = true
-                appState.isDownloading = false
-                transcriptionService.loadModel(model, language: appState.selectedLanguage)
-            } catch {
-                appState.isDownloading = false
-                appState.recordingState = .error("Download failed: \(error.localizedDescription)")
             }
         }
     }

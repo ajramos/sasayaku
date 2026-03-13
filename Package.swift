@@ -8,14 +8,14 @@ let package = Package(
         .macOS(.v14)
     ],
     dependencies: [
-        .package(url: "https://github.com/exPHAT/SwiftWhisper.git", from: "1.2.0"),
+        .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
     ],
     targets: [
         .executableTarget(
             name: "Sasayaku",
-            dependencies: ["SwiftWhisper"],
+            dependencies: ["WhisperKit"],
             path: "Sources/Sasayaku",
-            exclude: ["Info.plist"],
+            exclude: ["Info.plist", "AppIcon.icns"],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreGraphics"),

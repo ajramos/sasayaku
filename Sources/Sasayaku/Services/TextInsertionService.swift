@@ -11,8 +11,8 @@ enum TextInsertionService {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        // Small delay to ensure clipboard is set before paste
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        // Delay to ensure modifier keys (Option) are fully released before pasting
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             Self.simulatePaste()
 
             // Restore previous clipboard after paste has been processed
@@ -26,7 +26,8 @@ enum TextInsertionService {
     }
 
     private static func simulatePaste() {
-        let source = CGEventSource(stateID: .hidSystemState)
+        // Use a dedicated event source to avoid inheriting current modifier state
+        let source = CGEventSource(stateID: .combinedSessionState)
 
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
@@ -34,10 +35,12 @@ enum TextInsertionService {
             return
         }
 
-        keyDown.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
+        // Explicitly set ONLY Command flag — no Option, no Shift, nothing else
+        keyDown.flags = CGEventFlags.maskCommand
+        keyUp.flags = CGEventFlags.maskCommand
 
-        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        usleep(10000) // 10ms between key down and up
         keyUp.post(tap: .cghidEventTap)
 
         print("[Sasayaku] Paste event sent (Cmd+V)")

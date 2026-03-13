@@ -24,20 +24,38 @@ struct SettingsView: View {
                     SettingsCard(title: "Model", icon: "cpu", color: .purple) {
                         Picker("Model", selection: $appState.selectedModel) {
                             ForEach(WhisperModelType.allCases) { model in
-                                Text(model.displayName).tag(model)
+                                VStack(alignment: .leading) {
+                                    Text(model.displayName)
+                                }
+                                .tag(model)
                             }
                         }
                         .labelsHidden()
+                        .onChange(of: appState.selectedModel) { _, _ in
+                            NotificationCenter.default.post(name: .loadModel, object: nil)
+                        }
 
-                        if appState.isDownloading {
-                            VStack(spacing: 4) {
-                                ProgressView(value: appState.downloadProgress)
-                                    .tint(.purple)
-                                Text("Downloading... \(Int(appState.downloadProgress * 100))%")
-                                    .font(.system(size: 10, design: .monospaced))
+                        if appState.isLoadingModel {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("Downloading & loading...")
+                                    .font(.system(size: 10))
                                     .foregroundStyle(.secondary)
                             }
+                        } else if appState.isModelReady {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 11))
+                                Text("Ready")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .foregroundStyle(.green)
                         }
+
+                        Text(appState.selectedModel.description)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
                     }
 
                     // Language
